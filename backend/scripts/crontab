@@ -1,0 +1,9 @@
+# OSS Issue Finder - Daily sync
+# Install: crontab backend/scripts/crontab
+# Or add these lines to your existing crontab: crontab -e
+
+# Sync all companies daily at 6:00 AM
+0 6 * * * cd /app && python -m scripts.sync >> /var/log/ossearch/sync.log 2>&1
+
+# Generate embeddings for new issues at 6:30 AM
+30 6 * * * cd /app && python -m scripts.generate_embeddings >> /var/log/ossearch/embeddings.log 2>&1
