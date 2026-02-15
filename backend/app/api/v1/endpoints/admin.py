@@ -1,16 +1,18 @@
+import asyncio
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import verify_admin_key
 from app.core.database import get_db
 from app.models.company import Company
 from app.models.issue import Issue
 from app.models.repository import Repository
 from app.schemas.admin import CreateCompanyRequest, UpdateCompanyRequest
 from app.schemas.company import CompanyResponse
-from app.tasks.scraping import scrape_single_company
+from app.tasks.sync import sync_single
 
 router = APIRouter()
 
@@ -23,6 +25,7 @@ def slugify(name: str) -> str:
 async def create_company(
     data: CreateCompanyRequest,
     db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_admin_key),
 ):
     existing = await db.execute(
         select(Company).where(Company.github_org == data.github_org)
@@ -47,7 +50,8 @@ async def create_company(
     await db.commit()
     await db.refresh(company)
 
-    scrape_single_company.delay(company.id)
+    # Fire-and-forget: sync runs in background, response returns immediately
+    asyncio.create_task(sync_single(company.id))
 
     return CompanyResponse(
         id=company.id,
@@ -67,6 +71,7 @@ async def update_company(
     slug: str,
     data: UpdateCompanyRequest,
     db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_admin_key),
 ):
     result = await db.execute(select(Company).where(Company.slug == slug))
     company = result.scalar_one_or_none()
@@ -95,6 +100,7 @@ async def update_company(
 async def delete_company(
     slug: str,
     db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_admin_key),
 ):
     result = await db.execute(select(Company).where(Company.slug == slug))
     company = result.scalar_one_or_none()

@@ -35,7 +35,7 @@ This platform solves that by:
 1. **Aggregating** open issues from 10+ open-source companies into a single interface
 2. **Indexing** issues with OpenAI embeddings so you can search semantically (e.g., searching "AI" also finds issues about "machine learning", "neural networks", etc.)
 3. **Filtering** by programming language, company, labels ("good first issue", "help wanted"), and star count
-4. **Refreshing** data every 12 hours via background workers, prioritizing consistency over real-time freshness
+4. **Refreshing** data daily via cron jobs, prioritizing consistency over real-time freshness
 
 ---
 
@@ -48,42 +48,43 @@ This platform solves that by:
                                         +--------+-----------+
                                                  |
                                                  v
-+----------------+      +------------------+  +--+---------------+    +------------------+
-|                |      |                  |  |                  |    |                  |
-|  Next.js       | ---> |  FastAPI         |  |  Celery Worker   |    |  Celery Beat     |
-|  Frontend      |      |  Backend         |  |  (scraper +      |    |  (scheduler)     |
-|  (port 3000)   |      |  (port 8000)     |  |   embeddings)    |    |                  |
-|                |      |                  |  |                  |    |                  |
-+----------------+      +--------+---------+  +--------+---------+    +--------+---------+
-                                 |                     |                       |
-                                 v                     v                       v
-                        +--------+---------+  +--------+---------+    +--------+---------+
-                        |                  |  |                  |    |                  |
-                        |  PostgreSQL      |  |  OpenAI          |    |  Redis           |
-                        |  + pgvector      |  |  Embeddings API  |    |  (task broker)   |
-                        |  (port 5432)     |  |                  |    |  (port 6379)     |
-                        |                  |  |                  |    |                  |
-                        +------------------+  +------------------+    +------------------+
++----------------+      +------------------+  +--+---------------+
+|                |      |                  |  |                  |
+|  Next.js       | ---> |  FastAPI         |  |  Cron Jobs       |
+|  Frontend      |      |  Backend         |  |  (sync +         |
+|  (port 3000)   |      |  (port 8000)     |  |   embeddings)    |
+|                |      |                  |  |                  |
++----------------+      +--------+---------+  +--------+---------+
+                                 |                     |
+                                 v                     v
+                        +--------+---------+  +--------+---------+
+                        |                  |  |                  |
+                        |  PostgreSQL      |  |  OpenAI          |
+                        |  + pgvector      |  |  Embeddings API  |
+                        |  (port 5432)     |  |                  |
+                        |                  |  |                  |
+                        +------------------+  +------------------+
 ```
 
 **Monorepo layout**: `frontend/` (Next.js) and `backend/` (FastAPI) live side-by-side.
 
 ### Data Flow
 
-1. **Celery Beat** triggers the scraping task every 12 hours
-2. **Celery Worker** calls the GitHub GraphQL API to fetch repos and issues for each curated company
+1. **Cron jobs** trigger the sync script daily at 6 AM
+2. **Sync script** calls the GitHub GraphQL API to fetch repos and issues for each curated company
 3. Issues are upserted into **PostgreSQL** (new issues created, existing ones updated, closed ones marked stale)
-4. A second Celery task generates **OpenAI embeddings** for issues that don't have them yet (title + first 500 chars of body)
+4. A second cron job generates **OpenAI embeddings** for issues that don't have them yet (title + first 500 chars of body)
 5. Embeddings are stored in the `issues.embedding` column using **pgvector**
 6. The **FastAPI backend** serves paginated, filtered, and semantically-searchable issue data
-7. The **Next.js frontend** renders the UI with search, filters, and issue cards
+7. **Search cache** (SQLite with 48h TTL) avoids repeated embedding calls for common queries
+8. The **Next.js frontend** renders the UI with search, filters, and issue cards
 
 ---
 
 ## Tech Stack
 
 | Layer | Technology | Version | Purpose |
-|-------|-----------|---------|---------|
+|-------|-----------|---------|---------
 | Frontend | Next.js | 16 | React framework with App Router + SSR |
 | Frontend | Tailwind CSS | 4 | Utility-first CSS |
 | Frontend | shadcn/ui | latest | Accessible UI component library |
@@ -93,12 +94,11 @@ This platform solves that by:
 | Backend | FastAPI | 0.115 | Async Python API framework |
 | Backend | SQLAlchemy | 2.0 | Async ORM with PostgreSQL |
 | Backend | Alembic | 1.14 | Database migrations |
-| Backend | Celery | 5.4 | Distributed task queue |
 | Backend | httpx | 0.28 | Async HTTP client for GitHub API |
 | Backend | OpenAI SDK | 1.58 | Embedding generation |
 | Database | PostgreSQL | 16 | Primary data store |
 | Database | pgvector | 0.3 | Vector similarity search extension |
-| Cache/Broker | Redis | 7 | Celery task broker + result backend |
+| Cache | SQLite | - | Search result cache (48h TTL) |
 
 ---
 
@@ -133,23 +133,40 @@ Two reasons:
 
 The scoring formula is: `combined_score = 0.6 * semantic_score + 0.4 * keyword_score`
 
-### Why Celery + Redis instead of FastAPI BackgroundTasks?
+### Why cron jobs instead of Celery + Redis?
 
-Scraping all companies takes several minutes (many API calls with rate limits). Celery provides:
+For a personal project, Celery + Redis adds unnecessary complexity:
 
-- **Persistence**: Tasks survive API server restarts
-- **Retry logic**: Automatic retry with configurable backoff
-- **Scheduling**: Celery Beat handles cron-like periodic execution
-- **Monitoring**: Task status, results, and failure tracking
+- **Simpler deployment**: No Redis server, no worker processes, no beat scheduler
+- **Easier debugging**: Plain Python scripts you can run directly
+- **Lower resource usage**: No always-on worker processes
+- **Sufficient for the use case**: Daily syncs don't need distributed task queues
 
-FastAPI BackgroundTasks are tied to the request lifecycle and lack all of the above.
+The sync runs via standard cron:
+```bash
+# Daily at 6:00 AM
+0 6 * * * cd /app && python -m scripts.sync
+
+# Embeddings at 6:30 AM
+30 6 * * * cd /app && python -m scripts.generate_embeddings
+```
+
+### Why tiered search with caching?
+
+Not every query needs the full embedding pipeline:
+
+1. **Tier 1 - Cache hit**: Returns instantly, R$0 cost
+2. **Tier 2 - Simple keywords**: Queries like "Python", "React" use SQL LIKE search, R$0 cost
+3. **Tier 3 - Semantic search**: Complex queries use OpenAI embeddings
+
+A SQLite cache with 48h TTL stores search results, so repeated searches for common terms don't hit the embedding API.
 
 ### Why consistency over real-time freshness?
 
-The scraper runs every 12 hours instead of continuously because:
+The sync runs daily instead of continuously because:
 
 - GitHub API rate limits (5,000 points/hour) would be exhausted quickly with real-time polling across 10+ orgs
-- Issues don't change that frequently -- a 12-hour window is acceptable for discovery
+- Issues don't change that frequently -- a 24-hour window is acceptable for discovery
 - Batch processing is more reliable and easier to monitor than streaming updates
 - Embedding generation is a separate step that benefits from batching
 
@@ -173,12 +190,13 @@ Each embedding is generated from `"{title} {body[:500]}"` -- including the first
 search-open-source-issues/
 |-- .env.example                    # Environment variable template
 |-- .gitignore
-|-- docker-compose.yml              # All services (db, redis, backend, celery, frontend)
+|-- docker-compose.yml              # Services (db, backend)
 |-- implementation-plan.md          # Detailed implementation plan
 |-- README.md                       # This file
 |
 |-- backend/
 |   |-- Dockerfile
+|   |-- Procfile                    # Web process only
 |   |-- requirements.txt
 |   |-- requirements-dev.txt        # Test dependencies
 |   |-- alembic.ini                 # Migration config
@@ -188,9 +206,13 @@ search-open-source-issues/
 |   |   |-- versions/
 |   |       |-- 001_initial_schema.py
 |   |
+|   |-- scripts/
+|   |   |-- sync.py                 # Standalone sync script for cron
+|   |   |-- generate_embeddings.py  # Standalone embeddings script for cron
+|   |   |-- crontab                 # Cron configuration example
+|   |
 |   |-- app/
 |       |-- main.py                 # FastAPI app entrypoint
-|       |-- celery_app.py           # Celery config + beat schedule
 |       |-- seed.py                 # Seed 10 curated companies
 |       |
 |       |-- core/
@@ -222,13 +244,14 @@ search-open-source-issues/
 |       |   |-- github_client.py    # GitHub GraphQL API client
 |       |   |-- scraper.py          # Scraping orchestrator
 |       |   |-- embedding_service.py # OpenAI embedding generation
-|       |   |-- search_service.py   # Hybrid semantic + keyword search
+|       |   |-- search_service.py   # Tiered search (cache → keyword → semantic)
+|       |   |-- search_cache.py     # SQLite cache with 48h TTL
 |       |   |-- issue_service.py    # Issue queries with filters/pagination
 |       |   |-- stats_service.py    # Aggregate statistics queries
 |       |
 |       |-- tasks/
-|           |-- scraping.py         # Celery task: scrape all/single company
-|           |-- embeddings.py       # Celery task: generate missing embeddings
+|           |-- sync.py             # Sync functions (called by cron script)
+|           |-- embeddings.py       # Embedding functions (called by cron script)
 |
 |-- frontend/
     |-- Dockerfile
@@ -388,6 +411,7 @@ curl "http://localhost:8000/api/v1/stats/"
 # Add a new company via admin API
 curl -X POST "http://localhost:8000/api/v1/admin/companies/" \
   -H "Content-Type: application/json" \
+  -H "X-Admin-Key: your_admin_key" \
   -d '{"name": "Grafana", "github_org": "grafana", "website": "https://grafana.com", "description": "Open source observability platform"}'
 ```
 
@@ -510,18 +534,18 @@ Edit `.env` and fill in your tokens:
 GITHUB_TOKEN=github_pat_your_token_here
 OPENAI_API_KEY=sk-your_key_here
 DATABASE_URL=postgresql+asyncpg://ossearch:ossearch_dev@db:5432/ossearch
-REDIS_URL=redis://redis:6379/0
+ADMIN_API_KEY=your_secret_admin_key
 ```
 
-> **Note**: The `DATABASE_URL` and `REDIS_URL` above use Docker service names (`db`, `redis`) and work for both setup options below.
+> **Note**: The `DATABASE_URL` above uses the Docker service name (`db`) and works for Docker setup.
 
-### Step 3: Start the full stack
+### Step 3: Start the stack
 
 ```bash
 docker compose up --build -d
 ```
 
-This starts all services: PostgreSQL, Redis, backend API, Celery worker, Celery beat scheduler, and the frontend.
+This starts PostgreSQL and the backend API.
 
 ### Step 4: Run database migrations and seed
 
@@ -542,28 +566,20 @@ Seeded 10 companies:
   ...
 ```
 
-### Step 5: Trigger the initial scrape
-
-The Celery beat scheduler will automatically scrape every 12 hours, but you can trigger the first scrape immediately:
+### Step 5: Run the initial sync
 
 ```bash
-docker compose exec backend python -c "
-import asyncio
-from app.tasks.scraping import _scrape_all
-asyncio.run(_scrape_all())
-"
+docker compose exec backend python -m scripts.sync
 ```
+
+This fetches all repos and issues from GitHub for the seeded companies.
 
 ### Step 6: Generate embeddings
 
-After the scrape completes:
+After the sync completes:
 
 ```bash
-docker compose exec backend python -c "
-import asyncio
-from app.tasks.embeddings import _generate_embeddings
-asyncio.run(_generate_embeddings())
-"
+docker compose exec backend python -m scripts.generate_embeddings
 ```
 
 ### Step 7: Open the app
@@ -575,21 +591,20 @@ asyncio.run(_generate_embeddings())
 
 ### Alternative: Local Development Setup
 
-If you prefer to run the backend and frontend locally (with hot reload) while keeping only the database and Redis in Docker:
+If you prefer to run the backend and frontend locally (with hot reload) while keeping only the database in Docker:
 
 **Additional prerequisites**: Python 3.11+, Node.js 20+
 
-**1. Start only the database and Redis:**
+**1. Start only the database:**
 
 ```bash
-docker compose up db redis -d
+docker compose up db -d
 ```
 
 **2. Update `.env` to use `localhost` instead of Docker service names:**
 
 ```env
 DATABASE_URL=postgresql+asyncpg://ossearch:ossearch_dev@localhost:5432/ossearch
-REDIS_URL=redis://localhost:6379/0
 ```
 
 **3. Set up and start the backend:**
@@ -604,16 +619,12 @@ python -m app.seed
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-**4. Start Celery workers (optional, in separate terminals):**
+**4. Run sync and embeddings manually:**
 
 ```bash
 cd backend && source .venv/bin/activate
-celery -A app.celery_app.celery worker --loglevel=info
-```
-
-```bash
-cd backend && source .venv/bin/activate
-celery -A app.celery_app.celery beat --loglevel=info
+python -m scripts.sync
+python -m scripts.generate_embeddings
 ```
 
 **5. Set up and start the frontend:**
@@ -622,6 +633,18 @@ celery -A app.celery_app.celery beat --loglevel=info
 cd frontend
 npm install
 npm run dev
+```
+
+### Setting Up Cron Jobs (Production)
+
+For automated daily syncs, add these to your crontab (`crontab -e`):
+
+```bash
+# Sync all companies daily at 6:00 AM
+0 6 * * * cd /path/to/backend && /path/to/python -m scripts.sync >> /var/log/ossearch/sync.log 2>&1
+
+# Generate embeddings at 6:30 AM
+30 6 * * * cd /path/to/backend && /path/to/python -m scripts.generate_embeddings >> /var/log/ossearch/embeddings.log 2>&1
 ```
 
 ---
@@ -639,6 +662,7 @@ npm run dev
 - **Search bar**: Type any keyword in the search bar. Results update after 300ms of inactivity (debounced)
 - **Cmd+K** (or Ctrl+K): Opens a quick-search command palette for fast issue lookup
 - **Semantic search**: Searching "AI" will also return issues about "machine learning", "neural networks", etc., thanks to OpenAI embeddings
+- **Tiered search**: Simple keywords (Python, React) use fast SQL search; complex queries use semantic search
 
 ### Filtering
 
@@ -662,6 +686,7 @@ You can add companies dynamically through the admin API:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/admin/companies/" \
   -H "Content-Type: application/json" \
+  -H "X-Admin-Key: your_admin_key" \
   -d '{
     "name": "Grafana",
     "github_org": "grafana",
@@ -673,12 +698,13 @@ curl -X POST "http://localhost:8000/api/v1/admin/companies/" \
 This will:
 1. Create the company record
 2. Automatically set the logo URL from GitHub
-3. Trigger an initial scrape to populate repos and issues
+3. Trigger an initial sync to populate repos and issues (runs in background)
 
 To remove a company:
 
 ```bash
-curl -X DELETE "http://localhost:8000/api/v1/admin/companies/grafana"
+curl -X DELETE "http://localhost:8000/api/v1/admin/companies/grafana" \
+  -H "X-Admin-Key: your_admin_key"
 ```
 
 You can also add companies directly in `backend/app/seed.py` and re-run the seed script.
@@ -692,8 +718,7 @@ You can also add companies directly in `backend/app/seed.py` and re-run the seed
 | `GITHUB_TOKEN` | Yes | - | GitHub PAT for GraphQL API access |
 | `OPENAI_API_KEY` | Yes | - | OpenAI API key for embedding generation |
 | `DATABASE_URL` | No | `postgresql+asyncpg://ossearch:ossearch_dev@localhost:5432/ossearch` | PostgreSQL connection string |
-| `REDIS_URL` | No | `redis://localhost:6379/0` | Redis connection string for Celery |
-| `SCRAPE_INTERVAL_HOURS` | No | `12` | How often to scrape (in hours) |
+| `ADMIN_API_KEY` | Yes | - | Secret key for admin API endpoints |
 | `ISSUES_PER_REPO` | No | `100` | Max open issues to fetch per repository |
 | `CORS_ORIGINS` | No | `["http://localhost:3000"]` | Allowed CORS origins |
 | `NEXT_PUBLIC_API_URL` | No | `http://localhost:8000` | Backend URL for the frontend |

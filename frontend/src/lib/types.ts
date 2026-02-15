@@ -76,3 +76,20 @@ export interface Stats {
   top_labels: LabelStat[];
   last_scraped_at: string | null;
 }
+
+export interface SuggestionCreate {
+  name: string;
+  github_org: string;
+  email?: string;
+  reason?: string;
+}
+
+export interface Suggestion {
+  id: number;
+  name: string;
+  github_org: string;
+  email: string | null;
+  reason: string | null;
+  status: string;
+  created_at: string;
+}

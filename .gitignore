@@ -39,6 +39,8 @@ postgres_data/
 htmlcov/
 .pytest_cache/
 
+# Search cache
+backend/data/
 
 backend/.venv
 frontend/package-lock.json

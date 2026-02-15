@@ -8,11 +8,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://ossearch:ossearch_dev@localhost:5432/ossearch"
-    REDIS_URL: str = "redis://localhost:6379/0"
     GITHUB_TOKEN: str = ""
     OPENAI_API_KEY: str = ""
+    ADMIN_API_KEY: str = ""
 
-    SCRAPE_INTERVAL_HOURS: int = 12
     ISSUES_PER_REPO: int = 100
 
     API_V1_PREFIX: str = "/api/v1"

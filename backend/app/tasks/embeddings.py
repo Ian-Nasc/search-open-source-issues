@@ -1,9 +1,12 @@
-import asyncio
+"""Embedding generation tasks.
+
+Can be run standalone via: python -m scripts.generate_embeddings
+Or called directly from code: await generate_missing_embeddings()
+"""
 import logging
 
 from sqlalchemy import select, update
 
-from app.celery_app import celery
 from app.core.database import AsyncSessionLocal
 from app.models import Issue
 from app.services.embedding_service import EmbeddingService
@@ -13,15 +16,13 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 100
 
 
-@celery.task(bind=True, max_retries=3, default_retry_delay=60)
-def generate_missing_embeddings(self):
-    asyncio.run(_generate_embeddings())
-
-
-async def _generate_embeddings():
+async def generate_missing_embeddings():
+    """Generate embeddings for issues that don't have them yet."""
     embedding_service = EmbeddingService()
 
     async with AsyncSessionLocal() as session:
+        total_processed = 0
+
         while True:
             result = await session.execute(
                 select(Issue)
@@ -32,7 +33,7 @@ async def _generate_embeddings():
             issues = result.scalars().all()
 
             if not issues:
-                logger.info("No more issues without embeddings")
+                logger.info(f"Done. Total issues processed: {total_processed}")
                 break
 
             texts = []
@@ -55,4 +56,5 @@ async def _generate_embeddings():
                 )
 
             await session.commit()
-            logger.info(f"Generated embeddings for {len(issues)} issues")
+            total_processed += len(issues)
+            logger.info(f"Generated embeddings for {len(issues)} issues (total: {total_processed})")

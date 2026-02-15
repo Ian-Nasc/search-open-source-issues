@@ -1,15 +1,28 @@
+"use client";
+
 import { Card } from "@/components/ui/card";
 import { CompanyAvatar } from "@/components/common/company-avatar";
 import { LabelBadge } from "@/components/common/label-badge";
 import { LanguageBadge } from "@/components/common/language-badge";
 import { ExternalLink, MessageSquare, Star } from "lucide-react";
 import type { Issue } from "@/lib/types";
+import { trackEvent } from "@/lib/posthog";
 
 interface IssueCardProps {
   issue: Issue;
 }
 
 export function IssueCard({ issue }: IssueCardProps) {
+  const handleClick = () => {
+    trackEvent("issue_clicked", {
+      issue_id: issue.id,
+      issue_number: issue.number,
+      repository: issue.repository.full_name,
+      company: issue.company.name,
+      language: issue.repository.primary_language,
+    });
+  };
+
   return (
     <Card className="group flex items-start gap-4 border-border/50 p-4 transition-all duration-200 hover:border-emerald-500/30 hover:shadow-lg hover:shadow-emerald-500/5">
       <CompanyAvatar company={issue.company} size={40} />
@@ -30,6 +43,7 @@ export function IssueCard({ issue }: IssueCardProps) {
           href={issue.url}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={handleClick}
           className="mt-1 block font-medium leading-snug text-foreground transition-colors hover:text-emerald-400 hover:underline"
         >
           {issue.title}

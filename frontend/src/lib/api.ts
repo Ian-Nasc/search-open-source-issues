@@ -1,4 +1,4 @@
-import type { Company, Issue, PaginatedResponse, Stats } from "./types";
+import type { Company, Issue, PaginatedResponse, Stats, Suggestion, SuggestionCreate } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const API_V1 = `${API_BASE}/api/v1`;
@@ -39,5 +39,19 @@ export const api = {
   },
   stats: {
     get: () => fetchAPI<Stats>("/stats/"),
+  },
+  suggestions: {
+    submit: async (data: SuggestionCreate): Promise<Suggestion> => {
+      const res = await fetch(`${API_V1}/suggestions/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({ detail: "Failed to submit" }));
+        throw new Error(error.detail || `API error: ${res.status}`);
+      }
+      return res.json();
+    },
   },
 };

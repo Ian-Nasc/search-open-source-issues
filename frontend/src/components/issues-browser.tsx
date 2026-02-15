@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IssueFiltersPanel } from "@/components/issues/issue-filters";
 import { IssueList } from "@/components/issues/issue-list";
@@ -11,6 +11,7 @@ import { useDebounce } from "@/hooks/use-debounce";
 import { useIssues, useSearchIssues } from "@/hooks/use-issues";
 import { useStats } from "@/hooks/use-stats";
 import { useCompanies } from "@/hooks/use-companies";
+import { trackEvent } from "@/lib/posthog";
 import type { IssueFilters } from "@/lib/types";
 
 export function IssuesBrowser() {
@@ -20,6 +21,17 @@ export function IssuesBrowser() {
   const debouncedQuery = useDebounce(searchQuery, 300);
 
   const isSearching = debouncedQuery.length >= 2;
+  const lastTrackedQuery = useRef("");
+
+  useEffect(() => {
+    if (debouncedQuery.length >= 2 && debouncedQuery !== lastTrackedQuery.current) {
+      lastTrackedQuery.current = debouncedQuery;
+      trackEvent("search_performed", {
+        query: debouncedQuery,
+        filters: filters,
+      });
+    }
+  }, [debouncedQuery, filters]);
 
   const issuesQuery = useIssues({
     ...filters,
