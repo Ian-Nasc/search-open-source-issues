@@ -1,0 +1,31 @@
+name: Daily Sync
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # 9 AM UTC daily
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Sync
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+        run: |
+          response=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/api/v1/admin/sync/" \
+            -H "X-Admin-Key: ${ADMIN_API_KEY}")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n -1)
+
+          echo "Response: $body"
+          echo "HTTP Code: $http_code"
+
+          if [ "$http_code" != "202" ]; then
+            echo "Sync trigger failed with status $http_code"
+            exit 1
+          fi
+
+          echo "Sync triggered successfully"

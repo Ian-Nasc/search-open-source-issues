@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 # Project root is two levels up from this file (config.py -> core -> app -> backend -> root)
@@ -16,6 +17,13 @@ class Settings(BaseSettings):
 
     API_V1_PREFIX: str = "/api/v1"
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",")]
+        return v
 
     class Config:
         env_file = str(_PROJECT_ROOT / ".env")

@@ -23,6 +23,7 @@ It scrapes GitHub issues from curated open-source companies (PostHog, Supabase, 
 - [Adding New Companies](#adding-new-companies)
 - [Environment Variables](#environment-variables)
 - [Curated Companies](#curated-companies)
+- [Production Deployment](#production-deployment)
 
 ---
 
@@ -743,3 +744,130 @@ The platform ships with 10 pre-configured open-source companies:
 | Plane | [makeplane](https://github.com/makeplane) | Open source project management |
 
 Add more via the admin API or by editing `backend/app/seed.py`.
+
+---
+
+## Production Deployment
+
+This section covers deploying the platform to production using:
+- **Frontend**: Vercel (free tier)
+- **Backend**: Fly.io (~$12-15/month with Postgres)
+- **Scheduled Sync**: GitHub Actions cron workflow
+
+### Deploy Frontend to Vercel
+
+1. **Install Vercel CLI**:
+   ```bash
+   npm i -g vercel
+   ```
+
+2. **Deploy**:
+   ```bash
+   cd frontend
+   vercel login
+   vercel         # First deploy - creates project
+   vercel --prod  # Production deploy
+   ```
+
+3. **Set Environment Variables** in Vercel Dashboard → Project → Settings → Environment Variables:
+
+   | Variable | Value |
+   |----------|-------|
+   | `NEXT_PUBLIC_API_URL` | `https://your-api.fly.dev` |
+   | `NEXT_PUBLIC_POSTHOG_KEY` | Your PostHog key (optional) |
+
+### Deploy Backend to Fly.io
+
+1. **Install Fly CLI**:
+   ```bash
+   # macOS
+   brew install flyctl
+
+   # Or universal
+   curl -L https://fly.io/install.sh | sh
+   ```
+
+2. **Login and Launch**:
+   ```bash
+   cd backend
+   fly auth login
+   fly launch  # Creates app, choose region, skip Postgres for now
+   ```
+
+3. **Create Postgres Database**:
+   ```bash
+   fly postgres create \
+     --name ossearch-db \
+     --region gru \
+     --initial-cluster-size 1 \
+     --vm-size shared-cpu-1x \
+     --volume-size 10
+
+   fly postgres attach ossearch-db --app ossearch-api
+   ```
+
+4. **Set Secrets**:
+   ```bash
+   fly secrets set \
+     GITHUB_TOKEN="github_pat_xxx" \
+     OPENAI_API_KEY="sk-xxx" \
+     ADMIN_API_KEY="your-secure-key" \
+     CORS_ORIGINS="https://your-app.vercel.app"
+   ```
+
+5. **Deploy**:
+   ```bash
+   fly deploy
+   ```
+
+6. **Run Migrations & Initial Sync**:
+   ```bash
+   fly ssh console -C "alembic upgrade head"
+   fly ssh console -C "python -m app.seed"
+   fly ssh console -C "python -m scripts.sync"
+   fly ssh console -C "python -m scripts.generate_embeddings"
+   ```
+
+### Set Up Scheduled Sync
+
+The daily sync is handled by a GitHub Actions workflow that triggers the admin sync endpoint.
+
+1. **Add GitHub Secrets** in your repository Settings → Secrets and variables → Actions:
+
+   | Secret | Value |
+   |--------|-------|
+   | `API_URL` | `https://your-api.fly.dev` |
+   | `ADMIN_API_KEY` | Same key set in Fly.io secrets |
+
+2. The workflow at `.github/workflows/daily-sync.yml` runs daily at 9 AM UTC.
+
+3. **Manual Trigger**: Go to Actions → Daily Sync → Run workflow.
+
+### Monitoring Commands
+
+```bash
+# Check app status
+fly status
+
+# View logs
+fly logs
+
+# SSH into container
+fly ssh console
+
+# Check Postgres
+fly postgres connect -a ossearch-db
+
+# Verify health
+curl https://your-api.fly.dev/health
+```
+
+### Estimated Costs
+
+| Service | Item | Monthly |
+|---------|------|---------|
+| Vercel | Free tier | $0 |
+| Fly.io | Backend VM (512MB) | ~$5 |
+| Fly.io | Postgres Dev | ~$7 |
+| Fly.io | Bandwidth | ~$1-2 |
+| **Total** | | **~$13-14/mo** |

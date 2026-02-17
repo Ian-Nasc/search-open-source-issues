@@ -1,7 +1,7 @@
 import asyncio
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +12,7 @@ from app.models.issue import Issue
 from app.models.repository import Repository
 from app.schemas.admin import CreateCompanyRequest, UpdateCompanyRequest
 from app.schemas.company import CompanyResponse
-from app.tasks.sync import sync_single
+from app.tasks.sync import sync_all, sync_single
 
 router = APIRouter()
 
@@ -122,3 +122,13 @@ async def delete_company(
 
     await db.execute(delete(Company).where(Company.id == company.id))
     await db.commit()
+
+
+@router.post("/sync/", status_code=202)
+async def trigger_sync(
+    background_tasks: BackgroundTasks,
+    _: bool = Depends(verify_admin_key),
+):
+    """Trigger a full sync of all companies."""
+    background_tasks.add_task(sync_all)
+    return {"status": "sync started"}
